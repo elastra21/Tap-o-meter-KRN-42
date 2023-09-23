@@ -1,15 +1,4 @@
-#include <Arduino.h>
-#include "FS.h"
-#include "WIFI.h"
-#include "line.h"
-#include "Reader.h"
-#include "Screen.h"
-#include "secrets.h"
-#include <esp_wifi.h>
-#include "SocketComm.h"
-#include <ArduinoJson.h>
-#include <WiFiManager32.h>
-// #include <SocketIoClient.h>
+#include "main.h"
 
 WIFI wifi;
 Line line;
@@ -25,36 +14,6 @@ bool reset = false, selecting_opt = false, loading = false, redeem_beer = false,
 
 //newClient
 
-void setUpWiFi();
-void bootOptions();
-void otaUpdating();
-void flowCounter();
-void lineUnlocked();
-uint16_t mermando();
-void setUpSocketConnection();
-void filling(uint16_t pulses);
-uint16_t countQty(bool calibrate);
-void touchLoop(void * pvParameters);
-void handleTouch(bool remote = false);
-void socketManager(void * pvParameters);
-bool countQty(String screen_msg, uint16_t ml);
-void SetConnectedScreen(bool retriable = false);
-void commitPurchase(String concept, String qty);
-JsonObject decodeJson(const char * payload);
-bool validateJsonResponse(JsonObject json_response);
- //--------------------------------------> API Handlers <--------------------------------------
-void event(const char * payload, size_t length);  //
-void onConnect(const char * payload, size_t length);  //
-void onClaimBeer(const char * payload, size_t length);  //
-void onLineChange(const char * payload, size_t length);  //
-void onDisconnect(const char * payload, size_t length);  //
-void onRemoteSell(const char * payload, size_t length);  //
-void onInfoRecived(const char * payload, size_t length);  //
-void validateClient(const char * payload, size_t length);  //
-void validateResponse(const char * payload, size_t length);  //
-void onNewEmergencyCard(const char * payload, size_t length);  //
-void onDisconnectedLine(const char * payload, size_t length);  //
-
 //-------------------------------------->Set UP
 void setup() {
   Serial2.begin(115200);
@@ -62,6 +21,7 @@ void setup() {
 
   pinMode(VALVE_PIN, OUTPUT);
   pinMode(FLOWMETER_PIN, OUTPUT);
+
   digitalWrite(VALVE_PIN, LOW);
 
   api.setConfigString(wifi.macAddress());
@@ -79,12 +39,14 @@ void setup() {
     no_tries++;
   }
 
-  if (no_tries > 4) {
-    Serial2.println(line.getLineStatus());
-    bootOptions();
-  }
+  if (no_tries > 4) bootOptions();
 
   pinMode(FLOWMETER_PIN, INPUT);
+
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error has occurred while mounting SPIFFS");
+    return;
+  }
 }
 
 void loop() {
@@ -148,15 +110,6 @@ void loop() {
     }
 }
 
-
-
-
-
-
-
-
-
-
 void lineUnlocked(){
   selecting_opt = true;
   while (selecting_opt) {
@@ -172,6 +125,7 @@ void lineUnlocked(){
 
 //-------------------------------------->Socket Handlers
 void event(const char * payload, size_t length) {
+  //THIS IS FOR DEBUGGING PURPOSES
   Serial2.printf("got message: %s\n", payload);
 }
 
@@ -182,7 +136,6 @@ line.saveEmergencyCard(payload);
 void onConnect(const char * payload, size_t length) {
   if (!line.isConnected()) api.requestLineData();
 }
-
 
 void onDisconnect(const char * payload, size_t length) {
   // Serial2.println("Valio madre");
@@ -237,7 +190,6 @@ void onClaimBeer(const char * payload, size_t length) {
 }
 
 void onLineChange(const char * payload, size_t length) {
-
   api.requestLineData();
 }
 
@@ -289,13 +241,6 @@ void socketManager( void * pvParameters ){
   }
 }
 
-// void touchLoop( void * pvParameters ){
-//   while(1){
-//     if (screen.isTouchEneable()) handleTouch();
-//     vTaskDelay(100 / portTICK_PERIOD_MS);
-//     Serial2.println(xPortGetFreeHeapSize()); // debug available memory
-//   }
-// }
 
 void SetConnectedScreen(bool retriable){
   // if retriable should should give 2 options, Retry or AP
@@ -319,12 +264,13 @@ void setUpWiFi(){
 }
 
 void bootOptions(){
+  Serial2.println(line.getLineStatus());
   screen.retryOrAP();
   while (screen.actualScreen == RETRY_AP_SCR && line.theresNoInfo()) handleTouch(); 
 }
 
 void setUpSocketConnection(){
-  wifi.startMDNS();
+
   api.on(CONNECT, onConnect);
   api.on(CLAIM_BEER, onClaimBeer);
   api.on(DISCONNECT, onDisconnect);
@@ -335,31 +281,35 @@ void setUpSocketConnection(){
   api.on(VALIDATED_USER, validateResponse);
   api.on(DISCONNECTED_LINE, onDisconnectedLine);
   api.on(ADD_EMERGENCY_CARD, onNewEmergencyCard);
-  char ip[13];    
-  wifi.getIP().toCharArray(ip,15);
-  Serial2.println(ip);
-  // webSocket.begin(ip, PORT);
-  api.connect(ip);
-  xTaskCreatePinnedToCore(socketManager, "Socket loop", 16384,  NULL, 1, NULL, CORE0);
-  // xTaskCreatePinnedToCore(touchLoop, "Handle touch", 15360,  NULL, 1, NULL, 1);
+  
+  api.connect(wifi.getIP().c_str());
+  xTaskCreatePinnedToCore(socketManager, "Socket loop", 16384,  NULL, 1, NULL, CORE0); // THIS SHOULD BE MOVED TO SOCKETCOMM.H 
 }
 
 void filling(uint16_t pulses){
-  uint8_t last_percent = 0;
   pulse_counter = 0;
-  const uint8_t min_qty = (uint8_t)((100*screen.ppm*20)/pulses);
+  uint8_t last_percent = 0;
   uint32_t time_out = millis() + SERVING_TIME_OUT;
+  const uint8_t min_qty = (uint8_t)((100*screen.ppm*20)/pulses);
+
+  line.initPouringLog(reader.getWorkerId(), pulses);
+
   while ((pulse_counter < pulses) && screen.isServing && time_out > millis()) {
     if ((pulse_counter < screen.ppm * 20) || (last_percent > 69)) handleTouch();
     const uint8_t percent = (uint8_t)((100*pulse_counter)/pulses);
     if (percent > last_percent ) {
+      line.savePouredPulses(pulse_counter);
+
       if      (percent == min_qty) screen.hideCancell(); //hide cancel
       else if (percent == 70) screen.showReady(); // show listo
+
       last_percent = percent;
       time_out = millis() + SERVING_TIME_OUT;
       screen.servingScreen(false, percent, "");
     }
   }
+  line.closeLogFile();
+
   selecting_opt = false;
   if (last_percent > 70 && !screen.isServing) screen.isServing = true;
 }
@@ -386,15 +336,11 @@ uint16_t mermando(){
   return pulse_counter;
 }
 
-
 void commitPurchase( String concept, String qty){
   if(!reader.isOnEmergency()){
     const String worker_id = reader.getWorkerId();
     const String client_id = reader.getClientId();
     api.registerPurchase(client_id, worker_id, concept, qty, screen.kegId);
-    // const String data = "{ \"workerId\":\"" + worker_id +"\", \"kegId\":\"" + screen.kegId + "\", \"concept\":\"" + concept + "\", \"qty\": \"" + qty ;
-    // const String client = (client_id.length() > 0 ? "\", \"clientId\": \"" + client_id : "");
-    // webSocket.emit(SALE_COMPLETE, (data+client+JSON_END).c_str());
   }
   reader.removeUser();
 }
@@ -514,7 +460,7 @@ void handleTouch(bool remote){
 }
 
 bool countQty(String screen_msg, uint16_t ml){
-  attachInterrupt(FLOWMETER_PIN, flowCounter, RISING);
+  attachInterrupt(FLOWMETER_PIN, flowCounter, RISING); // THIS SHOULD BE AT LINE CLASS AND NAMED AS OPEN VALVE
   digitalWrite(VALVE_PIN, HIGH);
   screen.servingScreen(true, 0, screen_msg);
   filling(screen.ppm * ml);
@@ -523,9 +469,9 @@ bool countQty(String screen_msg, uint16_t ml){
 }
 
 uint16_t countQty(bool calibrate){
-  attachInterrupt(FLOWMETER_PIN, flowCounter, RISING);
-  calibrate ? screen.calibrationScreen(0) : screen.mermar(0);
+  attachInterrupt(FLOWMETER_PIN, flowCounter, RISING);  // THIS SHOULD BE AT LINE CLASS AND NAMED AS OPEN VALVE
   digitalWrite(VALVE_PIN, HIGH);
+  calibrate ? screen.calibrationScreen(0) : screen.mermar(0);
   const uint16_t merma_pulses = mermando();
   digitalWrite(VALVE_PIN, LOW);
   return merma_pulses;

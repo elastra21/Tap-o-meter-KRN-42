@@ -35,7 +35,10 @@ bool WIFI::setUpWiFi(uint8_t max_tries){
   // EEPROM.commit();
   // EEPROM.end();
 
-  if(connection_state) Serial2.println("Connected");
+  if(connection_state) {
+    startMDNS();
+    Serial2.println("Connected");
+  }
   return connection_state;
 }
 
@@ -75,7 +78,9 @@ void WIFI::startMDNS(){
 }
 
 String WIFI::getIP(){
-  return MDNS.queryHost("tom-server").toString();
+  String ip = MDNS.queryHost("tom-server").toString();
+  Serial2.println(ip);
+  return ip;
 }
 
 bool WIFI::theresValidSSID(){

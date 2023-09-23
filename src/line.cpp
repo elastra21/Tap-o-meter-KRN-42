@@ -96,3 +96,53 @@ bool Line::compareEmergencyCard(String card_id){
   const String emergency_card = getEmergencyCardFromMemory();
   return emergency_card.equals(card_id);
 }
+
+void Line::initPouringLog(String user, uint16_t pulses){
+  deletePouringLog();
+  
+  logFile = SPIFFS.open("/fillingLog.txt", FILE_APPEND);
+  logFile.println(user + ", " + pulses);
+}
+
+void Line::savePouredPulses(uint16_t pulses){
+  logFile.println(pulses);
+  logFile.flush();
+}
+
+pouringLog Line::getPouringLog(){
+  pouringLog log;
+  logFile = SPIFFS.open("/fillingLog.txt", FILE_READ);
+  if (logFile) {
+    String line = logFile.readStringUntil('\n');
+    log.user = line.substring(0, line.indexOf(','));
+    log.pulses = line.substring(line.indexOf(',') + 2).toInt();
+    log.poured_pulses = 0;
+    while (logFile.available()) {
+      line = logFile.readStringUntil('\n');
+      log.poured_pulses += line.toInt();
+    }
+    logFile.close();
+  }
+  return log;
+} 
+
+bool Line::theresNoFinishedLog(){
+  // TODO THIS IS NOT FINISHED YET 
+
+  logFile = SPIFFS.open("/fillingLog.txt", FILE_READ);
+  if (logFile) {
+    String line = logFile.readStringUntil('\n');
+    logFile.close();
+    return line.length() == 0;
+  }
+  return true;
+}
+
+void Line::closeLogFile(){
+  logFile.close();
+}
+
+
+void Line::deletePouringLog(){
+  SPIFFS.remove("/fillingLog.txt");
+}
